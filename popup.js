@@ -1,4 +1,4 @@
-import * as Tone from 'https://cdn.jsdelivr.net/npm/tone@14.7.77/build/esm/Tone.js';
+// Self-contained piano engine using Web Audio API - No external dependencies!
 
 // State
 const state = {
@@ -8,8 +8,12 @@ const state = {
     preset: 'hotel',
     noteCount: 0,
     startTime: Date.now(),
-    scheduledEvents: [],
-    currentNote: null,
+    audioContext: null,
+    reverbNode: null,
+    gainNode: null,
+    convolverNode: null,
+    activeOscillators: [],
+    reverbBuffer: null
 };
 
 // Preset configurations
@@ -48,11 +52,18 @@ const PRESETS = {
     }
 };
 
-// Note ranges
+// Note ranges and frequencies
 const NOTE_RANGES = {
     narrow: ['C4', 'E4', 'G4', 'B4', 'D5', 'F5'],
     medium: ['G3', 'B3', 'D4', 'F4', 'A4', 'C5', 'E5', 'G5'],
     wide: ['E3', 'G3', 'B3', 'D4', 'F4', 'A4', 'C5', 'E5', 'G5', 'B5']
+};
+
+const NOTE_FREQUENCIES = {
+    'C3': 130.81, 'D3': 146.83, 'E3': 164.81, 'F3': 174.61, 'G3': 196.00, 'A3': 220.00, 'B3': 246.94,
+    'C4': 261.63, 'D4': 293.66, 'E4': 329.63, 'F4': 349.23, 'G4': 392.00, 'A4': 440.00, 'B4': 493.88,
+    'C5': 523.25, 'D5': 587.33, 'E5': 659.25, 'F5': 698.46, 'G5': 783.99, 'A5': 880.00, 'B5': 987.77,
+    'C6': 1046.50, 'D6': 1174.66, 'E6': 1318.51, 'F6': 1396.91, 'G6': 1567.98, 'A6': 1760.00, 'B6': 1975.53
 };
 
 // DOM elements
@@ -69,144 +80,171 @@ const elements = {
     noteDisplay: document.getElementById('noteDisplay'),
     noteCount: document.getElementById('noteCount'),
     presetDisplay: document.getElementById('presetDisplay'),
-    galaxyBg: document.getElementById('galaxy-bg'),
 };
 
-// Audio engine
+// Audio Engine using Web Audio API
 class PianoEngine {
     constructor() {
-        this.sampler = null;
-        this.reverb = null;
-        this.volume = null;
+        this.audioContext = null;
+        this.reverbNode = null;
+        this.gainNode = null;
+        this.convolverNode = null;
         this.isInitialized = false;
-        this.initializing = false;
+        this.activeNotes = new Map();
     }
 
     async init() {
-        if (this.isInitialized || this.initializing) return;
-        this.initializing = true;
-
+        if (this.isInitialized) return;
+        
         try {
-            // Create reverb
-            this.reverb = new Tone.Reverb({
-                decay: 8,
-                preDelay: 0.1,
-                wet: state.reverb
-            });
-
-            // Create volume
-            this.volume = new Tone.Volume(state.volume * 10 - 10).toDestination();
-
-            // Create sampler with 3 samples (C2, C4, C6)
-            this.sampler = new Tone.Sampler({
-                urls: {
-                    C2: 'samples/C2.wav',
-                    C4: 'samples/C4.wav',
-                    C6: 'samples/C6.wav',
-                },
-                baseUrl: chrome.runtime.getURL('/'),
-                onload: () => {
-                    console.log('Sampler loaded');
-                },
-                onerror: (err) => {
-                    console.warn('Sample loading failed, using oscillators:', err);
-                    this.useFallbackSynth();
-                }
-            });
-
-            // Connect: sampler -> reverb -> volume
-            this.sampler.connect(this.reverb);
-            this.reverb.connect(this.volume);
-
-            // Wait for Tone to be ready
-            await Tone.start();
+            // Create audio context
+            this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
             
-            // Check if sampler has samples loaded
-            if (this.sampler.loaded === false) {
-                // Try to load with a timeout
-                await new Promise(resolve => setTimeout(resolve, 2000));
-                if (this.sampler.loaded === false) {
-                    this.useFallbackSynth();
-                }
-            }
-
+            // Create gain node (volume control)
+            this.gainNode = this.audioContext.createGain();
+            this.gainNode.gain.value = state.volume;
+            this.gainNode.connect(this.audioContext.destination);
+            
+            // Create reverb
+            await this.createReverb();
+            
             this.isInitialized = true;
-            this.initializing = false;
-            console.log('Piano engine initialized');
+            console.log('Audio engine initialized');
         } catch (error) {
-            console.warn('Failed to initialize sampler, using fallback:', error);
-            this.useFallbackSynth();
-            this.isInitialized = true;
-            this.initializing = false;
+            console.error('Failed to initialize audio:', error);
         }
     }
 
-    useFallbackSynth() {
-        console.log('Using fallback synth');
-        // Create a simple synth as fallback
-        this.sampler = new Tone.PolySynth(Tone.Synth, {
-            oscillator: {
-                type: 'triangle'
-            },
-            envelope: {
-                attack: 0.01,
-                decay: 0.1,
-                sustain: 0.3,
-                release: 1.5
+    async createReverb() {
+        try {
+            // Create impulse response for reverb
+            const sampleRate = this.audioContext.sampleRate;
+            const length = sampleRate * 3; // 3 second reverb
+            const impulse = this.audioContext.createBuffer(2, length, sampleRate);
+            
+            for (let channel = 0; channel < 2; channel++) {
+                const channelData = impulse.getChannelData(channel);
+                for (let i = 0; i < length; i++) {
+                    const decay = Math.exp(-i / (sampleRate * 0.8 * (0.5 + state.reverb * 0.5)));
+                    channelData[i] = (Math.random() * 2 - 1) * decay * 0.3;
+                }
             }
-        });
-        this.sampler.connect(this.reverb);
-        this.reverb.connect(this.volume);
+            
+            this.convolverNode = this.audioContext.createConvolver();
+            this.convolverNode.buffer = impulse;
+            this.convolverNode.connect(this.gainNode);
+            
+            // Create reverb wet/dry mix
+            this.reverbNode = this.audioContext.createGain();
+            this.reverbNode.gain.value = state.reverb;
+            
+            // Connect: input -> reverb -> gain -> destination
+            // We'll connect sources to both dry and wet paths
+        } catch (e) {
+            console.warn('Reverb creation failed, using simple delay:', e);
+            // Fallback to simple delay
+            this.reverbNode = this.audioContext.createDelay(1.5);
+            this.reverbNode.delayTime.value = 0.5;
+            this.reverbNode.connect(this.gainNode);
+        }
     }
 
-    playNote(note, time = Tone.now()) {
-        if (!this.isInitialized || !this.sampler) return;
+    playNote(note, time = 0) {
+        if (!this.isInitialized || !this.audioContext) return;
+        
         try {
-            // Handle different sampler types
-            if (typeof this.sampler.triggerAttack === 'function') {
-                this.sampler.triggerAttack(note, time, state.volume * 0.5);
-            } else if (typeof this.sampler.triggerAttackRelease === 'function') {
-                this.sampler.triggerAttackRelease(note, '8n', time, state.volume * 0.5);
+            const freq = NOTE_FREQUENCIES[note];
+            if (!freq) return;
+            
+            const now = this.audioContext.currentTime + time;
+            
+            // Create oscillator for piano-like sound
+            const osc = this.audioContext.createOscillator();
+            const gain = this.audioContext.createGain();
+            
+            // Use multiple oscillators for richer sound
+            const osc2 = this.audioContext.createOscillator();
+            const gain2 = this.audioContext.createGain();
+            
+            // Main oscillator
+            osc.type = 'triangle';
+            osc.frequency.setValueAtTime(freq, now);
+            osc.frequency.exponentialRampToValueAtTime(freq * 1.001, now + 0.1);
+            
+            // Second oscillator for harmonics
+            osc2.type = 'sine';
+            osc2.frequency.setValueAtTime(freq * 2, now);
+            gain2.gain.setValueAtTime(0.1, now);
+            gain2.gain.exponentialRampToValueAtTime(0.001, now + 0.5);
+            
+            // Envelope
+            gain.gain.setValueAtTime(0.001, now);
+            gain.gain.exponentialRampToValueAtTime(0.5 * state.volume, now + 0.01);
+            gain.gain.exponentialRampToValueAtTime(0.3 * state.volume, now + 0.3);
+            gain.gain.exponentialRampToValueAtTime(0.001, now + 1.5);
+            
+            // Connect
+            osc.connect(gain);
+            osc2.connect(gain2);
+            
+            // Connect to reverb or direct
+            if (this.reverbNode && this.convolverNode) {
+                // Wet path
+                const wetGain = this.audioContext.createGain();
+                wetGain.gain.value = state.reverb * 0.7;
+                gain.connect(wetGain);
+                wetGain.connect(this.convolverNode);
+                
+                // Dry path
+                const dryGain = this.audioContext.createGain();
+                dryGain.gain.value = 1 - state.reverb * 0.5;
+                gain.connect(dryGain);
+                dryGain.connect(this.gainNode);
+                
+                gain2.connect(this.convolverNode);
+            } else {
+                gain.connect(this.gainNode);
+                gain2.connect(this.gainNode);
             }
+            
+            // Start and stop
+            osc.start(now);
+            osc.stop(now + 1.5);
+            osc2.start(now);
+            osc2.stop(now + 0.8);
+            
+            // Store for cleanup
+            const noteId = `${note}_${now}`;
+            this.activeNotes.set(noteId, { osc, osc2, gain, gain2 });
+            
+            // Auto cleanup
+            setTimeout(() => {
+                this.activeNotes.delete(noteId);
+            }, 2000);
+            
         } catch (e) {
             console.debug('Note play error:', e);
         }
     }
 
-    releaseNote(note, time = Tone.now()) {
-        if (!this.isInitialized || !this.sampler) return;
-        try {
-            if (typeof this.sampler.triggerRelease === 'function') {
-                this.sampler.triggerRelease(note, time);
-            }
-        } catch (e) {
-            console.debug('Note release error:', e);
-        }
-    }
-
     setVolume(value) {
         state.volume = value;
-        if (this.volume) {
-            this.volume.volume.value = value * 10 - 10;
+        if (this.gainNode) {
+            this.gainNode.gain.value = value;
         }
     }
 
     setReverb(value) {
         state.reverb = value;
-        if (this.reverb) {
-            this.reverb.wet.value = value;
+        // Recreate reverb with new value
+        if (this.audioContext) {
+            this.createReverb();
         }
     }
 
     dispose() {
-        if (this.sampler) {
-            this.sampler.dispose();
-        }
-        if (this.reverb) {
-            this.reverb.dispose();
-        }
-        if (this.volume) {
-            this.volume.dispose();
+        if (this.audioContext) {
+            this.audioContext.close();
         }
         this.isInitialized = false;
     }
@@ -221,7 +259,6 @@ class MusicGenerator {
         this.isRunning = false;
         this.timeoutId = null;
         this.lastNoteTime = 0;
-        this.activeNotes = new Set();
     }
 
     start() {
@@ -238,11 +275,6 @@ class MusicGenerator {
             clearTimeout(this.timeoutId);
             this.timeoutId = null;
         }
-        // Release all active notes
-        this.activeNotes.forEach(note => {
-            engine.releaseNote(note);
-        });
-        this.activeNotes.clear();
         this.updateStatus();
     }
 
@@ -255,22 +287,17 @@ class MusicGenerator {
         const range = NOTE_RANGES[preset.range];
         const complexity = preset.complexity;
 
-        // Calculate time until next note (in seconds)
         const baseInterval = 60 / tempo;
         const variation = baseInterval * 0.3;
         let interval = baseInterval + (Math.random() - 0.5) * variation * 2;
-
-        // Adjust density
         interval = interval / (0.5 + density * 0.8);
 
-        // Schedule next note
         this.timeoutId = setTimeout(() => {
             this.playNoteCluster(range, complexity);
             this.scheduleNotes();
             this.updateStatus();
         }, interval * 1000);
 
-        // Play first note immediately if this is a new session
         if (this.lastNoteTime === 0) {
             this.playNoteCluster(range, complexity);
         }
@@ -278,40 +305,25 @@ class MusicGenerator {
     }
 
     playNoteCluster(range, complexity) {
-        // Number of notes in this cluster
         const noteCount = Math.floor(1 + Math.random() * complexity);
         const notes = [];
 
         for (let i = 0; i < noteCount; i++) {
-            // Random note from range
             const note = range[Math.floor(Math.random() * range.length)];
             notes.push(note);
         }
 
-        // Play notes with slight timing variations
-        const now = Tone.now();
         notes.forEach((note, index) => {
             const delay = index * 0.05 + Math.random() * 0.03;
-            const time = now + delay;
             const duration = 0.5 + Math.random() * 1.0;
             
-            // Track active note
-            this.activeNotes.add(note);
+            engine.playNote(note, delay);
             
-            engine.playNote(note, time);
-            
-            // Release after duration
-            setTimeout(() => {
-                engine.releaseNote(note);
-                this.activeNotes.delete(note);
-            }, duration * 1000);
-
-            // Update UI
             setTimeout(() => {
                 elements.noteDisplay.textContent = note;
                 state.noteCount++;
                 elements.noteCount.textContent = `${state.noteCount} notes`;
-            }, delay * 1000);
+            }, delay * 1000 + 50);
         });
     }
 
@@ -321,7 +333,6 @@ class MusicGenerator {
         const seconds = Math.floor(elapsed % 60);
         elements.timeDisplay.textContent = 
             `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
-        
         elements.noteCount.textContent = `${state.noteCount} notes`;
     }
 }
@@ -350,24 +361,20 @@ createStars();
 
 // UI Event Handlers
 function setupUI() {
-    // Play button
     elements.playBtn.addEventListener('click', togglePlay);
 
-    // Volume slider
     elements.volumeSlider.addEventListener('input', (e) => {
         const val = parseInt(e.target.value);
         elements.volumeValue.textContent = val + '%';
         engine.setVolume(val / 100);
     });
 
-    // Reverb slider
     elements.reverbSlider.addEventListener('input', (e) => {
         const val = parseInt(e.target.value);
         elements.reverbValue.textContent = val + '%';
         engine.setReverb(val / 100);
     });
 
-    // Preset buttons
     elements.presetBtns.forEach(btn => {
         btn.addEventListener('click', () => {
             elements.presetBtns.forEach(b => b.classList.remove('active'));
@@ -382,7 +389,6 @@ function setupUI() {
 
 function togglePlay() {
     if (state.isPlaying) {
-        // Pause
         state.isPlaying = false;
         generator.stop();
         elements.playBtn.classList.remove('active');
@@ -392,7 +398,6 @@ function togglePlay() {
         elements.statusBadge.style.color = '#ffaa88';
         elements.statusBadge.style.borderColor = 'rgba(255,170,136,0.2)';
     } else {
-        // Resume
         state.isPlaying = true;
         elements.playBtn.classList.add('active');
         elements.playLabel.textContent = 'Pause';
@@ -406,42 +411,23 @@ function togglePlay() {
 
 function applyPreset(preset) {
     const config = PRESETS[preset];
-    // Update reverb based on preset
     const reverbVal = config.reverb * 100;
     elements.reverbSlider.value = reverbVal;
     elements.reverbValue.textContent = Math.round(reverbVal) + '%';
     engine.setReverb(config.reverb);
-    
-    // Update status display
     elements.presetDisplay.textContent = config.description;
 }
 
 // Initialize
 async function init() {
     setupUI();
-    
-    // Initialize audio engine
     await engine.init();
-    
-    // Set initial values
     engine.setVolume(state.volume);
     engine.setReverb(state.reverb);
-    
-    // Start music
     generator.start();
-    
-    // Handle page visibility
-    document.addEventListener('visibilitychange', () => {
-        if (document.hidden) {
-            // Reduce CPU when hidden
-            if (generator.isRunning) {
-                // Keep running but with reduced complexity
-            }
-        }
-    });
 }
 
-// Cleanup on unload
+// Cleanup
 window.addEventListener('beforeunload', () => {
     generator.stop();
     engine.dispose();
@@ -449,6 +435,3 @@ window.addEventListener('beforeunload', () => {
 
 // Start
 init();
-
-// Export for debugging
-export { state, engine, generator };
