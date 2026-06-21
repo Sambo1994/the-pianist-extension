@@ -3,7 +3,7 @@
   "name": "The Pianist",
   "version": "1.0.0",
   "description": "Infinite generative piano music for commercial spaces with galaxy visuals",
-  "permissions": [],
+  "permissions": ["offscreen"],
   "host_permissions": [],
   "action": {
     "default_popup": "popup.html",
@@ -18,11 +18,11 @@
     "48": "icons/icon48.png",
     "128": "icons/icon128.png"
   },
-  "web_accessible_resources": [{
-    "resources": ["samples/*.wav"],
-    "matches": ["<all_urls>"]
-  }],
   "background": {
     "service_worker": "background.js"
-  }
+  },
+  "web_accessible_resources": [{
+    "resources": ["offscreen.html", "offscreen.js"],
+    "matches": ["<all_urls>"]
+  }]
 }
