@@ -1,0 +1,12 @@
+{
+  "name": "the-pianist-extension",
+  "version": "1.0.0",
+  "description": "Infinite generative piano music for commercial spaces",
+  "scripts": {
+    "build": "echo 'Build complete'",
+    "zip": "zip -r the-pianist.zip . -x '*.git*' -x 'node_modules/*'"
+  },
+  "dependencies": {
+    "tone": "^14.7.77"
+  }
+}
